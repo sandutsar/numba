@@ -7,9 +7,9 @@ in testing."""
 
 import unittest
 from numba.tests.support import TestCase
-import contextlib
 import ctypes
 import operator
+from functools import cached_property
 import numpy as np
 from numba import njit, types
 from numba.extending import overload, intrinsic, overload_classmethod
@@ -28,7 +28,6 @@ from numba.core.descriptors import TargetDescriptor
 from numba.core import cpu, typing, cgutils
 from numba.core.base import BaseContext
 from numba.core.compiler_lock import global_compiler_lock
-from numba.core.utils import cached_property
 from numba.core import callconv
 from numba.core.codegen import CPUCodegen, JITCodeLibrary
 from numba.core.callwrapper import PyCallWrapper
@@ -245,33 +244,16 @@ class DPUContext(BaseContext):
         return cfunc
 
 
-# Nested contexts to help with isolatings bits of compilations
-class _NestedContext(object):
-    _typing_context = None
-    _target_context = None
-
-    @contextlib.contextmanager
-    def nested(self, typing_context, target_context):
-        old_nested = self._typing_context, self._target_context
-        try:
-            self._typing_context = typing_context
-            self._target_context = target_context
-            yield
-        finally:
-            self._typing_context, self._target_context = old_nested
-
-
 # Implement a DPU TargetDescriptor, this one borrows bits from the CPU
 class DPUTarget(TargetDescriptor):
     options = cpu.CPUTargetOptions
-    _nested = _NestedContext()
 
-    @utils.cached_property
+    @cached_property
     def _toplevel_target_context(self):
         # Lazily-initialized top-level target context, for all threads
         return DPUContext(self.typing_context, self._target_name)
 
-    @utils.cached_property
+    @cached_property
     def _toplevel_typing_context(self):
         # Lazily-initialized top-level typing context, for all threads
         return typing.Context()
@@ -281,29 +263,14 @@ class DPUTarget(TargetDescriptor):
         """
         The target context for DPU targets.
         """
-        nested = self._nested._target_context
-        if nested is not None:
-            return nested
-        else:
-            return self._toplevel_target_context
+        return self._toplevel_target_context
 
     @property
     def typing_context(self):
         """
         The typing context for CPU targets.
         """
-        nested = self._nested._typing_context
-        if nested is not None:
-            return nested
-        else:
-            return self._toplevel_typing_context
-
-    def nested_context(self, typing_context, target_context):
-        """
-        A context manager temporarily replacing the contexts with the
-        given ones, for the current thread of execution.
-        """
-        return self._nested.nested(typing_context, target_context)
+        return self._toplevel_typing_context
 
 
 # Create a DPU target instance

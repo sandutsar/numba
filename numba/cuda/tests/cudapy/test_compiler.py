@@ -1,9 +1,14 @@
 from math import sqrt
-from numba import cuda, float32, uint32, void
+from numba import cuda, float32, int16, int32, int64, uint32, void
 from numba.cuda import compile_ptx, compile_ptx_for_current_device
-from numba.cuda.cudadrv.nvvm import NVVM
 
 from numba.cuda.testing import skip_on_cudasim, unittest, CUDATestCase
+
+
+# A test function at the module scope to ensure we get the name right for the C
+# ABI whether a function is at module or local scope.
+def f_module(x, y):
+    return x + y
 
 
 @skip_on_cudasim('Compilation unsupported in the simulator')
@@ -43,6 +48,19 @@ class TestCompileToPTX(unittest.TestCase):
         # Inferred return type as expected?
         self.assertEqual(resty, float32)
 
+        # Check that function's output matches signature
+        sig_int32 = int32(int32, int32)
+        ptx, resty = compile_ptx(add, sig_int32, device=True)
+        self.assertEqual(resty, int32)
+
+        sig_int16 = int16(int16, int16)
+        ptx, resty = compile_ptx(add, sig_int16, device=True)
+        self.assertEqual(resty, int16)
+        # Using string as signature
+        sig_string = "uint32(uint32, uint32)"
+        ptx, resty = compile_ptx(add, sig_string, device=True)
+        self.assertEqual(resty, uint32)
+
     def test_fastmath(self):
         def f(x, y, z, d):
             return sqrt((x * y + z) / d)
@@ -60,14 +78,10 @@ class TestCompileToPTX(unittest.TestCase):
 
         # With fastmath, ftz and approximate div / sqrt are enabled
         self.assertIn('fma.rn.ftz.f32', ptx)
-        # "full" refers to a full-range approximate divide
-        self.assertIn('div.full.ftz.f32', ptx)
+        self.assertIn('div.approx.ftz.f32', ptx)
         self.assertIn('sqrt.approx.ftz.f32', ptx)
 
     def check_debug_info(self, ptx):
-        if not NVVM().is_nvvm70:
-            self.skipTest('debuginfo not generated for NVVM 3.4')
-
         # A debug_info section should exist in the PTX. Whitespace varies
         # between CUDA toolkit versions.
         self.assertRegex(ptx, '\\.section\\s+\\.debug_info')
@@ -86,7 +100,7 @@ class TestCompileToPTX(unittest.TestCase):
         def f():
             pass
 
-        ptx, resty = compile_ptx(f, [], device=True, debug=True)
+        ptx, resty = compile_ptx(f, (), device=True, debug=True)
         self.check_debug_info(ptx)
 
     def test_kernel_with_debug(self):
@@ -94,7 +108,7 @@ class TestCompileToPTX(unittest.TestCase):
         def f():
             pass
 
-        ptx, resty = compile_ptx(f, [], debug=True)
+        ptx, resty = compile_ptx(f, (), debug=True)
         self.check_debug_info(ptx)
 
     def check_line_info(self, ptx):
@@ -107,15 +121,76 @@ class TestCompileToPTX(unittest.TestCase):
         def f():
             pass
 
-        ptx, resty = compile_ptx(f, [], device=True, lineinfo=True)
+        ptx, resty = compile_ptx(f, (), device=True, lineinfo=True)
         self.check_line_info(ptx)
 
     def test_kernel_with_line_info(self):
         def f():
             pass
 
-        ptx, resty = compile_ptx(f, [], lineinfo=True)
+        ptx, resty = compile_ptx(f, (), lineinfo=True)
         self.check_line_info(ptx)
+
+    def test_non_void_return_type(self):
+        def f(x, y):
+            return x[0] + y[0]
+
+        with self.assertRaisesRegex(TypeError, 'must have void return type'):
+            compile_ptx(f, (uint32[::1], uint32[::1]))
+
+    def test_c_abi_disallowed_for_kernel(self):
+        def f(x, y):
+            return x + y
+
+        with self.assertRaisesRegex(NotImplementedError,
+                                    "The C ABI is not supported for kernels"):
+            compile_ptx(f, (int32, int32), abi="c")
+
+    def test_unsupported_abi(self):
+        def f(x, y):
+            return x + y
+
+        with self.assertRaisesRegex(NotImplementedError,
+                                    "Unsupported ABI: fastcall"):
+            compile_ptx(f, (int32, int32), abi="fastcall")
+
+    def test_c_abi_device_function(self):
+        def f(x, y):
+            return x + y
+
+        ptx, resty = compile_ptx(f, int32(int32, int32), device=True, abi="c")
+        # There should be no more than two parameters
+        self.assertNotIn(ptx, "param_2")
+
+        # The function name should match the Python function name (not the
+        # qualname, which includes additional info), and its return value
+        # should be 32 bits
+        self.assertRegex(ptx, r"\.visible\s+\.func\s+\(\.param\s+\.b32\s+"
+                              r"func_retval0\)\s+f\(")
+
+        # If we compile for 64-bit integers, the return type should be 64 bits
+        # wide
+        ptx, resty = compile_ptx(f, int64(int64, int64), device=True, abi="c")
+        self.assertRegex(ptx, r"\.visible\s+\.func\s+\(\.param\s+\.b64")
+
+    def test_c_abi_device_function_module_scope(self):
+        ptx, resty = compile_ptx(f_module, int32(int32, int32), device=True,
+                                 abi="c")
+
+        # The function name should match the Python function name, and its
+        # return value should be 32 bits
+        self.assertRegex(ptx, r"\.visible\s+\.func\s+\(\.param\s+\.b32\s+"
+                              r"func_retval0\)\s+f_module\(")
+
+    def test_c_abi_with_abi_name(self):
+        abi_info = {'abi_name': '_Z4funcii'}
+        ptx, resty = compile_ptx(f_module, int32(int32, int32), device=True,
+                                 abi="c", abi_info=abi_info)
+
+        # The function name should match the one given in the ABI info, and its
+        # return value should be 32 bits
+        self.assertRegex(ptx, r"\.visible\s+\.func\s+\(\.param\s+\.b32\s+"
+                              r"func_retval0\)\s+_Z4funcii\(")
 
 
 @skip_on_cudasim('Compilation unsupported in the simulator')

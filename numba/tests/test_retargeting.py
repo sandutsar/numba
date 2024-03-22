@@ -1,8 +1,9 @@
 import unittest
 from contextlib import contextmanager
+from functools import cached_property
 
 from numba import njit
-from numba.core import errors, cpu, utils, typing
+from numba.core import errors, cpu, typing
 from numba.core.descriptors import TargetDescriptor
 from numba.core.dispatcher import TargetConfigurationStack
 from numba.core.retarget import BasicRetarget
@@ -27,33 +28,16 @@ class CustomCPU(CPU):
     pass
 
 
-# Nested contexts to help with isolatings bits of compilations
-class _NestedContext(object):
-    _typing_context = None
-    _target_context = None
-
-    @contextmanager
-    def nested(self, typing_context, target_context):
-        old_nested = self._typing_context, self._target_context
-        try:
-            self._typing_context = typing_context
-            self._target_context = target_context
-            yield
-        finally:
-            self._typing_context, self._target_context = old_nested
-
-
 # Implement a CustomCPU TargetDescriptor, this one borrows bits from the CPU
 class CustomTargetDescr(TargetDescriptor):
     options = cpu.CPUTargetOptions
-    _nested = _NestedContext()
 
-    @utils.cached_property
+    @cached_property
     def _toplevel_target_context(self):
         # Lazily-initialized top-level target context, for all threads
         return cpu.CPUContext(self.typing_context, self._target_name)
 
-    @utils.cached_property
+    @cached_property
     def _toplevel_typing_context(self):
         # Lazily-initialized top-level typing context, for all threads
         return typing.Context()
@@ -63,29 +47,14 @@ class CustomTargetDescr(TargetDescriptor):
         """
         The target context for DPU targets.
         """
-        nested = self._nested._target_context
-        if nested is not None:
-            return nested
-        else:
-            return self._toplevel_target_context
+        return self._toplevel_target_context
 
     @property
     def typing_context(self):
         """
         The typing context for CPU targets.
         """
-        nested = self._nested._typing_context
-        if nested is not None:
-            return nested
-        else:
-            return self._toplevel_typing_context
-
-    def nested_context(self, typing_context, target_context):
-        """
-        A context manager temporarily replacing the contexts with the
-        given ones, for the current thread of execution.
-        """
-        return self._nested.nested(typing_context, target_context)
+        return self._toplevel_typing_context
 
 
 custom_target = CustomTargetDescr(CUSTOM_TARGET)

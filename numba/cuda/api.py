@@ -85,6 +85,14 @@ def is_cuda_array(obj):
     return hasattr(obj, '__cuda_array_interface__')
 
 
+def is_float16_supported():
+    """Whether 16-bit floats are supported.
+
+    float16 is always supported in current versions of Numba - returns True.
+    """
+    return True
+
+
 @require_context
 def to_device(obj, stream=0, copy=True, to=None):
     """to_device(obj, stream=0, copy=True, to=None)
@@ -475,9 +483,9 @@ def detect():
         if os.name == "nt":
             attrs += [('Compute Mode', 'TCC' if tcc else 'WDDM')]
         attrs += [('FP32/FP64 Performance Ratio', fp32_to_fp64_ratio)]
-        if cc < (3, 0):
-            support = '[NOT SUPPORTED: CC < 3.0]'
-        elif cc < (5, 3):
+        if cc < (3, 5):
+            support = '[NOT SUPPORTED: CC < 3.5]'
+        elif cc < (5, 0):
             support = '[SUPPORTED (DEPRECATED)]'
             supported_count += 1
         else:

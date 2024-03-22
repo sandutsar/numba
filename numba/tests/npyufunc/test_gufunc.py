@@ -2,9 +2,8 @@ import unittest
 import pickle
 
 import numpy as np
-import numpy.core.umath_tests as ut
 
-from numba import void, float32, int64, jit, guvectorize
+from numba import void, float32, float64, int32, int64, jit, guvectorize
 from numba.np.ufunc import GUVectorize
 from numba.tests.support import tag, TestCase
 
@@ -33,7 +32,7 @@ class TestGUFunc(TestCase):
         B = np.arange(matrix_ct * 4 * 5, dtype=np.float32).reshape(matrix_ct, 4, 5)
 
         C = gufunc(A, B)
-        Gold = ut.matrix_multiply(A, B)
+        Gold = np.matmul(A, B)
 
         np.testing.assert_allclose(C, Gold, rtol=1e-5, atol=1e-8)
 
@@ -97,6 +96,75 @@ class TestGUFunc(TestCase):
         self.assertEqual("docstring for gufunc", gufunc.__doc__)
 
 
+class TestMultipleOutputs(TestCase):
+    target = 'cpu'
+
+    def test_multiple_outputs_same_type_passed_in(self):
+        @guvectorize('(x)->(x),(x)',
+                     target=self.target)
+        def copy(A, B, C):
+            for i in range(B.size):
+                B[i] = A[i]
+                C[i] = A[i]
+
+        A = np.arange(10, dtype=np.float32) + 1
+        B = np.zeros_like(A)
+        C = np.zeros_like(A)
+        copy(A, B, C)
+        np.testing.assert_allclose(A, B)
+        np.testing.assert_allclose(A, C)
+
+    def test_multiple_outputs_distinct_values(self):
+
+        @guvectorize('(x)->(x),(x)',
+                     target=self.target)
+        def copy_and_double(A, B, C):
+            for i in range(B.size):
+                B[i] = A[i]
+                C[i] = A[i] * 2
+
+        A = np.arange(10, dtype=np.float32) + 1
+        B = np.zeros_like(A)
+        C = np.zeros_like(A)
+        copy_and_double(A, B, C)
+        np.testing.assert_allclose(A, B)
+        np.testing.assert_allclose(A * 2, C)
+
+    def test_multiple_output_dtypes(self):
+
+        @guvectorize('(x)->(x),(x)',
+                     target=self.target)
+        def copy_and_multiply(A, B, C):
+            for i in range(B.size):
+                B[i] = A[i]
+                C[i] = A[i] * 1.5
+
+        A = np.arange(10, dtype=np.int32) + 1
+        B = np.zeros_like(A)
+        C = np.zeros_like(A, dtype=np.float64)
+        copy_and_multiply(A, B, C)
+        np.testing.assert_allclose(A, B)
+        np.testing.assert_allclose(A * np.float64(1.5), C)
+
+    def test_incorrect_number_of_pos_args(self):
+        @guvectorize('(m),(m)->(m),(m)', target=self.target)
+        def f(x, y, z, w):
+            pass
+
+        arr = np.arange(5, dtype=np.int32)
+
+        # Inputs only, too few
+        msg = "Too few arguments for function 'f'"
+        with self.assertRaises(TypeError) as te:
+            f(arr)
+        self.assertIn(msg, str(te.exception))
+
+        # Inputs and outputs, too many
+        with self.assertRaises(TypeError) as te:
+            f(arr, arr, arr, arr, arr)
+        self.assertIn(msg, str(te.exception))
+
+
 class TestGUFuncParallel(TestGUFunc):
     _numba_parallel_test_ = False
     target = 'parallel'
@@ -108,7 +176,7 @@ class TestDynamicGUFunc(TestCase):
     def test_dynamic_matmul(self):
 
         def check_matmul_gufunc(gufunc, A, B, C):
-            Gold = ut.matrix_multiply(A, B)
+            Gold = np.matmul(A, B)
             gufunc(A, B, C)
             np.testing.assert_allclose(C, Gold, rtol=1e-5, atol=1e-8)
 
@@ -163,7 +231,7 @@ class TestDynamicGUFunc(TestCase):
 
         # inp is (10000, 3)
         # out is (10000)
-        # The outter (leftmost) dimension must match or numpy broadcasting is performed.
+        # The outer (leftmost) dimension must match or numpy broadcasting is performed.
 
         self.assertTrue(sum_row.is_dynamic)
         inp = np.arange(30000, dtype=np.int32).reshape(10000, 3)
@@ -287,7 +355,7 @@ class TestGUVectorizeScalar(TestCase):
 
         # inp is (10000, 3)
         # out is (10000)
-        # The outter (leftmost) dimension must match or numpy broadcasting is performed.
+        # The outer (leftmost) dimension must match or numpy broadcasting is performed.
 
         inp = np.arange(30000, dtype=np.int32).reshape(10000, 3)
         out = sum_row(inp)

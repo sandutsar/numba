@@ -16,7 +16,7 @@ class GUFunc(serialize.ReduceMixin):
     """
 
     def __init__(self, py_func, signature, identity=None, cache=None,
-                 is_dynamic=False, targetoptions={}):
+                 is_dynamic=False, targetoptions={}, writable_args=()):
         self.ufunc = None
         self._frozen = False
         self._is_dynamic = is_dynamic
@@ -26,7 +26,7 @@ class GUFunc(serialize.ReduceMixin):
         # is a property of GUFunc. Thus, we hold a reference to a GUFuncBuilder
         # object here
         self.gufunc_builder = GUFuncBuilder(
-            py_func, signature, identity, cache, targetoptions)
+            py_func, signature, identity, cache, targetoptions, writable_args)
         self.__name__ = self.gufunc_builder.py_func.__name__
         functools.update_wrapper(self, py_func)
 
@@ -39,6 +39,7 @@ class GUFunc(serialize.ReduceMixin):
             cache=gb.cache,
             is_dynamic=self._is_dynamic,
             targetoptions=gb.targetoptions,
+            writable_args=gb.writable_args,
             typesigs=gb._sigs,
             frozen=self._frozen,
         )
@@ -46,10 +47,10 @@ class GUFunc(serialize.ReduceMixin):
 
     @classmethod
     def _rebuild(cls, py_func, signature, identity, cache, is_dynamic,
-                 targetoptions, typesigs, frozen):
+                 targetoptions, writable_args, typesigs, frozen):
         self = cls(py_func=py_func, signature=signature, identity=identity,
                    cache=cache, is_dynamic=is_dynamic,
-                   targetoptions=targetoptions)
+                   targetoptions=targetoptions, writable_args=writable_args)
         for sig in typesigs:
             self.add(sig)
         self.build_ufunc()
@@ -138,8 +139,7 @@ class GUFunc(serialize.ReduceMixin):
 
     def _num_args_match(self, *args):
         parsed_sig = parse_signature(self.gufunc_builder.signature)
-        # parsed_sig[1] has always length 1
-        return len(args) == len(parsed_sig[0]) + 1
+        return len(args) == len(parsed_sig[0]) + len(parsed_sig[1])
 
     def _get_signature(self, *args):
         parsed_sig = parse_signature(self.gufunc_builder.signature)
@@ -156,10 +156,12 @@ class GUFunc(serialize.ReduceMixin):
             else:
                 l.append(types.Array(ewise_types[idx], ndim, 'A'))
 
+        offset = len(parsed_sig[0])
         # add return type to signature
-        retty = ewise_types[-1]
-        ret_ndim = len(parsed_sig[-1][0]) or 1  # small hack to return scalar
-        l.append(types.Array(retty, ret_ndim, 'A'))
+        for idx, sig_dim in enumerate(parsed_sig[1]):
+            retty = ewise_types[idx + offset]
+            ret_ndim = len(sig_dim) or 1  # small hack to return scalars
+            l.append(types.Array(retty, ret_ndim, 'A'))
 
         return types.none(*l)
 

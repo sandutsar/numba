@@ -2,7 +2,9 @@ import platform
 import sys
 import os
 import re
+import shutil
 import warnings
+import traceback
 
 # YAML needed to use file based Numba config
 try:
@@ -13,6 +15,7 @@ except ImportError:
 
 
 import llvmlite.binding as ll
+
 
 IS_WIN32 = sys.platform.startswith('win32')
 IS_OSX = sys.platform.startswith('darwin')
@@ -67,15 +70,73 @@ def _os_supports_avx():
             return False
 
 
+_old_style_deprecation_msg = (
+    "Explicitly setting NUMBA_CAPTURED_ERRORS=old_style is deprecated. "
+    "See details at "
+    "https://numba.readthedocs.io/en/latest/reference/deprecation.html#deprecation-of-old-style-numba-captured-errors" # noqa: E501
+)
+
+
 # Choose how to handle captured errors
 def _validate_captured_errors_style(style_str):
+    # to prevent circular import
+    from numba.core.errors import NumbaPendingDeprecationWarning
+
     rendered_style = str(style_str)
-    if rendered_style not in ('new_style', 'old_style'):
+    if rendered_style not in ('new_style', 'old_style', 'default'):
         msg = ("Invalid style in NUMBA_CAPTURED_ERRORS: "
                f"{rendered_style}")
         raise ValueError(msg)
     else:
+        if rendered_style == 'default':
+            rendered_style = 'old_style'
+        elif rendered_style == 'old_style':
+            warnings.warn(_old_style_deprecation_msg,
+                          NumbaPendingDeprecationWarning)
         return rendered_style
+
+
+class _OptLevel(int):
+    """This class holds the "optimisation level" set in `NUMBA_OPT`. As this env
+    var can be an int or a string, but is almost always interpreted as an int,
+    this class subclasses int so as to get the common behaviour but stores the
+    actual value as a `_raw_value` member. The value "max" is a special case
+    and the property `is_opt_max` can be queried to find if the optimisation
+    level (supplied value at construction time) is "max"."""
+
+    def __new__(cls, *args, **kwargs):
+        assert len(args) == 1
+        (value,) = args
+        _int_value = 3 if value == 'max' else int(value)
+        # the int ctor is always called with an appropriate integer value
+        new = super().__new__(cls, _int_value, **kwargs)
+        # raw value is max or int
+        new._raw_value = value if value == 'max' else _int_value
+        return new
+
+    @property
+    def is_opt_max(self):
+        """Returns True if the the optimisation level is "max" False
+        otherwise."""
+        return self._raw_value == "max"
+
+    def __repr__(self):
+        if isinstance(self._raw_value, str):
+            arg = f"'{self._raw_value}'"
+        else:
+            arg = self._raw_value
+        return f"_OptLevel({arg})"
+
+
+def _process_opt_level(opt_level):
+
+    if opt_level not in ('0', '1', '2', '3', 'max'):
+        msg = ("Environment variable `NUMBA_OPT` is set to an unsupported "
+               f"value '{opt_level}', supported values are 0, 1, 2, 3, and "
+               "'max'")
+        raise ValueError(msg)
+    else:
+        return _OptLevel(opt_level)
 
 
 class _EnvReloader(object):
@@ -149,12 +210,18 @@ class _EnvReloader(object):
             try:
                 return ctor(value)
             except Exception:
-                warnings.warn("environ %s defined but failed to parse '%s'" %
-                              (name, value), RuntimeWarning)
+                warnings.warn(f"Environment variable '{name}' is defined but "
+                              f"its associated value '{value}' could not be "
+                              "parsed.\nThe parse failed with exception:\n"
+                              f"{traceback.format_exc()}",
+                              RuntimeWarning)
                 return default
 
         def optional_str(x):
             return str(x) if x is not None else None
+
+        # RVSDG frontend selection
+        USE_RVSDG_FRONTEND = _readenv("NUMBA_USE_RVSDG_FRONTEND", int, 0)
 
         # developer mode produces full tracebacks, disables help instructions
         DEVELOPER_MODE = _readenv("NUMBA_DEVELOPER_MODE", int, 0)
@@ -218,8 +285,11 @@ class _EnvReloader(object):
         # (up to and including IR generation)
         DEBUG_FRONTEND = _readenv("NUMBA_DEBUG_FRONTEND", int, 0)
 
-        # Enable debug prints in nrtdynmod
+        # Enable debug prints in nrtdynmod and use of "safe" API functions
         DEBUG_NRT = _readenv("NUMBA_DEBUG_NRT", int, 0)
+
+        # Enable NRT statistics counters
+        NRT_STATS = _readenv("NUMBA_NRT_STATS", int, 0)
 
         # How many recently deserialized functions to retain regardless
         # of external references
@@ -240,6 +310,9 @@ class _EnvReloader(object):
         # Enable tracing support
         TRACE = _readenv("NUMBA_TRACE", int, 0)
 
+        # Enable chrome tracing support
+        CHROME_TRACE = _readenv("NUMBA_CHROME_TRACE", str, "")
+
         # Enable debugging of type inference
         DEBUG_TYPEINFER = _readenv("NUMBA_DEBUG_TYPEINFER", int, 0)
 
@@ -251,7 +324,7 @@ class _EnvReloader(object):
                                 ("" if str(CPU_NAME).lower() == 'generic'
                                  else None))
         # Optimization level
-        OPT = _readenv("NUMBA_OPT", int, 3)
+        OPT = _readenv("NUMBA_OPT", _process_opt_level, _OptLevel(3))
 
         # Force dump of Python bytecode
         DUMP_BYTECODE = _readenv("NUMBA_DUMP_BYTECODE", int, DEBUG_FRONTEND)
@@ -293,12 +366,11 @@ class _EnvReloader(object):
         DUMP_OPTIMIZED = _readenv("NUMBA_DUMP_OPTIMIZED", int, DEBUG)
 
         # Force disable loop vectorize
-        # Loop vectorizer is disabled on 32-bit win32 due to a bug (#649)
-        LOOP_VECTORIZE = _readenv("NUMBA_LOOP_VECTORIZE", int,
-                                  not (IS_WIN32 and IS_32BITS))
+        LOOP_VECTORIZE = _readenv("NUMBA_LOOP_VECTORIZE", int, 1)
 
-        # Switch on  superword-level parallelism vectorization, default is on.
-        SLP_VECTORIZE = _readenv("NUMBA_SLP_VECTORIZE", int, 1)
+        # Enable superword-level parallelism vectorization, default is off
+        # since #8705 (miscompilation).
+        SLP_VECTORIZE = _readenv("NUMBA_SLP_VECTORIZE", int, 0)
 
         # Force dump of generated assembly
         DUMP_ASSEMBLY = _readenv("NUMBA_DUMP_ASSEMBLY", int, DEBUG)
@@ -367,7 +439,7 @@ class _EnvReloader(object):
 
         # The default compute capability to target when compiling to PTX.
         CUDA_DEFAULT_PTX_CC = _readenv("NUMBA_CUDA_DEFAULT_PTX_CC", _parse_cc,
-                                       (5, 2))
+                                       (5, 0))
 
         # Disable CUDA support
         DISABLE_CUDA = _readenv("NUMBA_DISABLE_CUDA",
@@ -410,6 +482,24 @@ class _EnvReloader(object):
         # Whether the default stream is the per-thread default stream
         CUDA_PER_THREAD_DEFAULT_STREAM = _readenv(
             "NUMBA_CUDA_PER_THREAD_DEFAULT_STREAM", int, 0)
+
+        CUDA_ENABLE_MINOR_VERSION_COMPATIBILITY = _readenv(
+            "NUMBA_CUDA_ENABLE_MINOR_VERSION_COMPATIBILITY", int, 0)
+
+        # Location of the CUDA include files
+        if IS_WIN32:
+            cuda_path = os.environ.get('CUDA_PATH')
+            if cuda_path:
+                default_cuda_include_path = os.path.join(cuda_path, "include")
+            else:
+                default_cuda_include_path = "cuda_include_not_found"
+        else:
+            default_cuda_include_path = os.path.join(os.sep, 'usr', 'local',
+                                                     'cuda', 'include')
+        CUDA_INCLUDE_PATH = _readenv("NUMBA_CUDA_INCLUDE_PATH", str,
+                                     default_cuda_include_path)
+
+        # Threading settings
 
         # The default number of threads to use.
         def num_threads_default():
@@ -465,7 +555,11 @@ class _EnvReloader(object):
                                              int, 0)
 
         # gdb binary location
-        GDB_BINARY = _readenv("NUMBA_GDB_BINARY", str, '/usr/bin/gdb')
+        def which_gdb(path_or_bin):
+            gdb = shutil.which(path_or_bin)
+            return gdb if gdb is not None else path_or_bin
+
+        GDB_BINARY = _readenv("NUMBA_GDB_BINARY", which_gdb, 'gdb')
 
         # CUDA Memory management
         CUDA_MEMORY_MANAGER = _readenv("NUMBA_CUDA_MEMORY_MANAGER", str,
@@ -478,6 +572,11 @@ class _EnvReloader(object):
         LLVM_REFPRUNE_FLAGS = _readenv(
             "NUMBA_LLVM_REFPRUNE_FLAGS", str,
             "all" if LLVM_REFPRUNE_PASS else "",
+        )
+
+        # llvmlite memory manager
+        USE_LLVMLITE_MEMORY_MANAGER = _readenv(
+            "NUMBA_USE_LLVMLITE_MEMORY_MANAGER", int, None
         )
 
         # Timing support.

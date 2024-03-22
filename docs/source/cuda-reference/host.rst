@@ -50,9 +50,9 @@ Numba maintains a list of supported CUDA-capable devices:
 
 Alternatively, the current device can be obtained:
 
-.. function:: numba.cuda.gpus.current
+.. attribute:: numba.cuda.gpus.current
 
-   Return the currently-selected device.
+   The currently-selected device.
 
 Getting a device through :attr:`numba.cuda.gpus` always provides an instance of
 :class:`numba.cuda.cudadrv.devices._DeviceContextManager`, which acts as a
@@ -94,6 +94,11 @@ the functionality of the selected device:
 
       Delete the context for the device. This will destroy all memory
       allocations, events, and streams created within the context.
+
+   .. attribute:: supports_float16
+
+      Return ``True`` if the device supports float16 operations, ``False``
+      otherwise.
 
 
 Compilation
